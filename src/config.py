@@ -141,6 +141,24 @@ def add_common_arguments(parser: ArgumentParser) -> None:
         version=get_version_string(),
         help="Show program's version and exit.",
     )
+    parser.add_argument(
+        "--selection-mode",
+        choices=["interactive", "all", "none"],
+        default="interactive",
+        help=(
+            "Selection mode for album downloads: 'interactive' (default), "
+            "'all', or 'none'."
+        ),
+    )
+    parser.add_argument(
+        "--selection",
+        type=str,
+        default=None,
+        help=(
+            "Optional selection expression for album items (example: '1,3,5' "
+            "or '1-5'). In interactive mode, this skips the prompt."
+        ),
+    )
 
 
 def setup_parser(

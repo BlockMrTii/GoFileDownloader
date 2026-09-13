@@ -61,19 +61,21 @@ class Downloader:
         """Initialize the downloader with the given parameters."""
         self.url = url
         self.live_manager = live_manager
-        self.password = args.password if "password" in args else None
-        self.max_workers = MAX_WORKERS
+        self.password = getattr(args, "password", None)
         self.token = get_account_token()
+        self.selection_mode = getattr(args, "selection_mode", "interactive")
+        self.selection_query = getattr(args, "selection", None)
+        custom_path = getattr(args, "custom_path", None)
 
         self.download_path = (
-            Path(args.custom_path)
-            if args.custom_path is not None
+            Path(custom_path)
+            if custom_path is not None
             else DEFAULT_DOWNLOAD_PATH
         )
         self.download_path.mkdir(parents=True, exist_ok=True)
         os.chdir(self.download_path)
 
-    def download_item(self, current_task: int, file_info: tuple) -> None:
+    def download_item(self, current_task: int, file_info: dict) -> None:
         """Download a single file."""
         filename = file_info["filename"]
         final_path = Path(file_info["download_path"]) / filename
@@ -102,11 +104,11 @@ class Downloader:
             task_id = self.live_manager.add_task(current_task=current_task)
             save_file_with_progress(response, final_path, task_id, self.live_manager)
 
-    def run_in_parallel(self, content_directory: str, files_info: tuple) -> None:
+    def run_in_parallel(self, content_directory: str, files_info: list[dict]) -> None:
         """Execute the file downloads in parallel."""
         os.chdir(content_directory)
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             for current_task, item_info in enumerate(files_info):
                 executor.submit(self.download_item, current_task, item_info)
 
@@ -143,19 +145,10 @@ class Downloader:
     def parse_links(
         self,
         identifier: str,
-        files_info: tuple,
+        current_path: Path,
         password: str | None = None,
-    ) -> None:
-        """Parse the URL for file links and populates a list with file information."""
-
-        def append_file_info(files_info: tuple, data: dict) -> None:
-            files_info.append(
-                {
-                    "download_path": str(Path.cwd()),
-                    "filename": data["name"],
-                    "download_link": data["link"],
-                },
-            )
+    ) -> dict | None:
+        """Parse content and return a tree structure for files and folders."""
 
         def check_password(data: dict) -> bool:
             password_exists = "password" in data
@@ -171,7 +164,7 @@ class Downloader:
                 event="Failed request",
                 details=f"Failed to get a link as response from {content_url}.",
             )
-            return
+            return None
 
         data = response["data"]
         if check_password(data):
@@ -180,26 +173,196 @@ class Downloader:
                 details="The URL requires a valid password. "
                 "Please provide one to proceed.",
             )
-            return
+            return None
 
         # Handle folder
         if data["type"] == "folder":
-            create_download_directory(data["name"])
-            os.chdir(data["name"])
+            folder_path = current_path / data["name"]
+            children = []
 
             for child_id in data["children"]:
                 child = data["children"][child_id]
 
                 if child["type"] == "folder":
-                    self.parse_links(child["id"], files_info, password)
+                    child_content = self.parse_links(
+                        child["id"],
+                        folder_path,
+                        password,
+                    )
+                    if child_content:
+                        children.append(child_content)
                 else:
-                    append_file_info(files_info, child)
-
-            os.chdir(os.path.pardir)
+                    children.append(
+                        {
+                            "type": "file",
+                            "name": child["name"],
+                            "relative_path": str(folder_path / child["name"]),
+                            "download_link": child["link"],
+                        },
+                    )
+            return {
+                "type": "folder",
+                "name": data["name"],
+                "relative_path": str(folder_path),
+                "children": children,
+            }
 
         # Handle file
+        return {
+            "type": "file",
+            "name": data["name"],
+            "relative_path": str(current_path / data["name"]),
+            "download_link": data["link"],
+        }
+
+    def _build_file_list(self, content_item: dict) -> list[dict]:
+        """Flatten a content tree into downloadable file metadata."""
+        if content_item["type"] == "file":
+            return [
+                {
+                    "relative_path": content_item["relative_path"],
+                    "download_link": content_item["download_link"],
+                },
+            ]
+
+        files_info = []
+        for child in content_item["children"]:
+            files_info.extend(self._build_file_list(child))
+        return files_info
+
+    def _build_selectable_items(
+        self,
+        content_item: dict,
+        all_files: list[dict],
+    ) -> list[dict]:
+        """Build selectable items for interactive file/folder selection."""
+        selectable_items = []
+        file_paths = {
+            file_info["relative_path"]
+            for file_info in all_files
+        }
+
+        def traverse(item: dict, is_root: bool = False) -> None:
+            if item["type"] == "folder":
+                folder_path = item["relative_path"]
+                selected_paths = {
+                    path
+                    for path in file_paths
+                    if path.startswith(f"{folder_path}/")
+                }
+                if selected_paths and not is_root:
+                    selectable_items.append(
+                        {
+                            "type": "folder",
+                            "relative_path": folder_path,
+                            "selected_paths": selected_paths,
+                        },
+                    )
+                for child in item["children"]:
+                    traverse(child)
+            else:
+                file_path = item["relative_path"]
+                selectable_items.append(
+                    {
+                        "type": "file",
+                        "relative_path": file_path,
+                        "selected_paths": {file_path},
+                        "download_link": item["download_link"],
+                    },
+                )
+
+        traverse(content_item, is_root=True)
+        return selectable_items
+
+    @staticmethod
+    def _parse_selection_expression(expression: str, max_items: int) -> set[int]:
+        """Parse selection input like '1,3,5' or '1-5' into indexes (1-based)."""
+        selection = expression.strip().lower()
+        if selection == "all":
+            return set(range(1, max_items + 1))
+        if selection == "none":
+            return set()
+
+        selected_indexes = set()
+        for segment in selection.split(","):
+            segment = segment.strip()
+            if not segment:
+                continue
+            if "-" in segment:
+                start_text, end_text = segment.split("-", maxsplit=1)
+                start = int(start_text.strip())
+                end = int(end_text.strip())
+                if start > end:
+                    start, end = end, start
+                selected_indexes.update(range(start, end + 1))
+            else:
+                selected_indexes.add(int(segment))
+
+        invalid_indexes = {
+            value
+            for value in selected_indexes
+            if value < 1 or value > max_items
+        }
+        if invalid_indexes:
+            raise ValueError(f"Invalid selection index(es): {sorted(invalid_indexes)}")
+
+        return selected_indexes
+
+    def _select_files_from_items(self, selectable_items: list[dict]) -> list[dict]:
+        """Select files from parsed content based on CLI mode and/or user input."""
+        total_items = len(selectable_items)
+        if total_items == 0:
+            return []
+
+        if self.selection_mode == "all":
+            selected_indexes = set(range(1, total_items + 1))
+        elif self.selection_mode == "none":
+            selected_indexes = set()
+        elif self.selection_query:
+            try:
+                selected_indexes = self._parse_selection_expression(
+                    self.selection_query,
+                    total_items,
+                )
+            except ValueError:
+                self.live_manager.update_log(
+                    event="Invalid selection",
+                    details=f"Invalid --selection value: {self.selection_query}",
+                )
+                return []
         else:
-            append_file_info(files_info, data)
+            console = self.live_manager.live.console
+            console.print("\nAvailable items to download:")
+            for index, item in enumerate(selectable_items, start=1):
+                item_type = "Folder" if item["type"] == "folder" else "File"
+                console.print(f"{index:>3}. [{item_type}] {item['relative_path']}")
+            console.print(
+                "\nChoose items (examples: '1,3,5', '1-5', 'all', 'none').",
+            )
+
+            while True:
+                selection_input = console.input("> ").strip()
+                try:
+                    selected_indexes = self._parse_selection_expression(
+                        selection_input,
+                        total_items,
+                    )
+                    break
+                except ValueError:
+                    console.print("Invalid selection. Please try again.")
+
+        selected_paths = set()
+        for selected_index in selected_indexes:
+            selected_paths.update(
+                selectable_items[selected_index - 1]["selected_paths"],
+            )
+
+        return [
+            item
+            for item in selectable_items
+            if item["type"] == "file"
+            and item["relative_path"] in selected_paths
+        ]
 
     def initialize_download(self) -> None:
         """Initialize the download process."""
@@ -207,13 +370,37 @@ class Downloader:
         content_directory = self.download_path / content_id
         create_download_directory(content_directory)
 
-        files_info = []
         hashed_password = (
             hashlib.sha256(self.password.encode()).hexdigest()
             if self.password
             else self.password
         )
-        self.parse_links(content_id, files_info, hashed_password)
+        content_tree = self.parse_links(content_id, Path(""), hashed_password)
+        if not content_tree:
+            if not os.listdir(content_directory):
+                Path(content_directory).rmdir()
+            return
+
+        all_files_info = self._build_file_list(content_tree)
+        if content_tree["type"] == "folder":
+            selectable_items = self._build_selectable_items(content_tree, all_files_info)
+            selected_files = self._select_files_from_items(selectable_items)
+        else:
+            selected_files = all_files_info
+
+        files_info = []
+        for file_info in selected_files:
+            file_path = Path(file_info["relative_path"])
+            files_info.append(
+                {
+                    "download_path": str(content_directory / file_path.parent),
+                    "filename": file_path.name,
+                    "download_link": file_info["download_link"],
+                },
+            )
+
+        for file_info in files_info:
+            create_download_directory(file_info["download_path"])
 
         # Remove the root content directory if there's no file or subdirectory.
         if not os.listdir(content_directory) and not files_info:

@@ -11,6 +11,7 @@ public and password-protected albums.
 - Supports [batch downloading](https://github.com/Lysagxra/GoFileDownloader?tab=readme-ov-file#batch-download) via a list of URLs.
 - Supports [downloading password-protected albums](https://github.com/Lysagxra/GoFileDownloader?tab=readme-ov-file#password-protected-album-download) by providing a password.
 - Supports [custom download location](https://github.com/Lysagxra/GoFileDownloader?tab=readme-ov-file#file-download-location).
+- Supports selective album downloads (interactive file/folder selection).
 - Progress indication during downloads.
 - Automatically creates a directory structure for organized storage.
 - Logs URLs that encounter errors for troubleshooting.
@@ -95,6 +96,27 @@ python3 downloader.py <gofile_url> <password>
 
 ```
 python3 downloader.py https://gofile.io/d/hXHGR1 TestPassword
+```
+
+## Album Selection Modes
+
+By default, album downloads use interactive selection mode and prompt you to choose
+which files/folders to download.
+
+### Options
+
+- `--selection-mode interactive` (default): prompts for selection.
+- `--selection-mode all`: downloads every file in the album.
+- `--selection-mode none`: skips all files.
+- `--selection "1,3,5"` or `--selection "1-5"`: provide selection directly (used
+  in interactive mode without prompt).
+
+### Examples
+
+```bash
+python3 downloader.py <gofile_url> --selection-mode all
+python3 downloader.py <gofile_url> --selection "1,3,5"
+python3 downloader.py <gofile_url> --selection "1-4"
 ```
 
 ## Batch Download
