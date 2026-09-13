@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -179,9 +180,13 @@ class Downloader:
         if data["type"] == "folder":
             folder_path = current_path / data["name"]
             children = []
+            api_children = list(data["children"].values())
+            files_by_creation_date = self._sort_files_by_creation_date(api_children)
+            sorted_files_iter = iter(files_by_creation_date)
 
-            for child_id in data["children"]:
-                child = data["children"][child_id]
+            for child in api_children:
+                if child["type"] != "folder":
+                    child = next(sorted_files_iter)
 
                 if child["type"] == "folder":
                     child_content = self.parse_links(
@@ -214,6 +219,54 @@ class Downloader:
             "relative_path": str(current_path / data["name"]),
             "download_link": data["link"],
         }
+
+    @staticmethod
+    def _get_creation_timestamp(item: dict) -> float | None:
+        """Extract an item's creation timestamp from GoFile fields if available."""
+        for key in ("createTime", "create_time", "createdAt", "created_at"):
+            value = item.get(key)
+            if value in (None, ""):
+                continue
+
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    continue
+                try:
+                    return float(stripped)
+                except ValueError:
+                    try:
+                        return datetime.fromisoformat(
+                            stripped.replace("Z", "+00:00"),
+                        ).timestamp()
+                    except ValueError:
+                        continue
+        return None
+
+    def _sort_files_by_creation_date(self, items: list[dict]) -> list[dict]:
+        """Sort files by creation date (oldest first) with stable API-order fallback."""
+        files_with_indexes = [
+            (index, item)
+            for index, item in enumerate(items)
+            if item["type"] != "folder"
+        ]
+        sortable_files = [
+            (index, item, self._get_creation_timestamp(item))
+            for index, item in files_with_indexes
+        ]
+        return [
+            item
+            for _, item, _ in sorted(
+                sortable_files,
+                key=lambda indexed_item: (
+                    indexed_item[2] is None,
+                    indexed_item[2] or 0.0,
+                    indexed_item[0],
+                ),
+            )
+        ]
 
     def _build_file_list(self, content_item: dict) -> list[dict]:
         """Flatten a content tree into downloadable file metadata."""
