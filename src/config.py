@@ -159,6 +159,15 @@ def add_common_arguments(parser: ArgumentParser) -> None:
             "or '1-5'). In interactive mode, this skips the prompt."
         ),
     )
+    parser.add_argument(
+        "--compare-path",
+        type=str,
+        default=None,
+        help=(
+            "Directory used to compare local files against GoFile folder-group "
+            "entries and mark existing ones in interactive selective mode."
+        ),
+    )
 
 
 def setup_parser(
