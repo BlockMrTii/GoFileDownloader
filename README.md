@@ -110,6 +110,9 @@ which files/folders to download.
 - `--selection-mode none`: skips all files.
 - `--selection "1,3,5"` or `--selection "1-5"`: provide selection directly (used
   in interactive mode without prompt).
+- `--compare-path <local_path>`: recursively compares all local files in
+  `<local_path>` against GoFile folder-group entries and marks existing items as
+  `[EXISTS]` in interactive selective mode (no artificial small file-count cap).
 
 ### Examples
 
@@ -117,6 +120,7 @@ which files/folders to download.
 python3 downloader.py <gofile_url> --selection-mode all
 python3 downloader.py <gofile_url> --selection "1,3,5"
 python3 downloader.py <gofile_url> --selection "1-4"
+python3 downloader.py <gofile_url> --selection-mode interactive --compare-path /path/to/local/folder
 ```
 
 ## Batch Download

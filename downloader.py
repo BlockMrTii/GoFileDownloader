@@ -66,6 +66,7 @@ class Downloader:
         self.token = get_account_token()
         self.selection_mode = getattr(args, "selection_mode", "interactive")
         self.selection_query = getattr(args, "selection", None)
+        self.compare_path = getattr(args, "compare_path", None)
         custom_path = getattr(args, "custom_path", None)
 
         self.download_path = (
@@ -73,8 +74,87 @@ class Downloader:
             if custom_path is not None
             else DEFAULT_DOWNLOAD_PATH
         )
+        self.compare_relative_paths, self.compare_filenames = (
+            self._collect_local_files_for_comparison(self.compare_path)
+        )
         self.download_path.mkdir(parents=True, exist_ok=True)
         os.chdir(self.download_path)
+
+    @staticmethod
+    def _normalize_relative_path(path: str | Path) -> str:
+        """Normalize a relative path for stable comparison."""
+        return Path(path).as_posix().casefold().lstrip("./")
+
+    @classmethod
+    def _build_path_match_candidates(cls, path: str | Path) -> list[str]:
+        """Build deterministic path candidates for path-aware matching."""
+        normalized_path = cls._normalize_relative_path(path)
+        candidates = [normalized_path]
+        parts = Path(normalized_path).parts
+        if len(parts) > 1:
+            candidates.append("/".join(parts[1:]))
+        return candidates
+
+    @classmethod
+    def _collect_local_files_for_comparison(
+        cls,
+        compare_path: str | None,
+    ) -> tuple[set[str], set[str]]:
+        """Recursively collect local files for comparison."""
+        if not compare_path:
+            return set(), set()
+
+        base_path = Path(compare_path).expanduser()
+        if not base_path.exists() or not base_path.is_dir():
+            logging.warning(
+                "Invalid --compare-path '%s'. Continuing without local comparison.",
+                compare_path,
+            )
+            return set(), set()
+
+        relative_paths = set()
+        filenames = set()
+        for local_path in base_path.rglob("*"):
+            if not local_path.is_file():
+                continue
+            relative_paths.add(
+                cls._normalize_relative_path(local_path.relative_to(base_path)),
+            )
+            filenames.add(local_path.name.casefold())
+
+        return relative_paths, filenames
+
+    def _item_exists_locally(self, relative_path: str) -> bool:
+        """Return whether a GoFile item already exists in local compare path."""
+        for path_candidate in self._build_path_match_candidates(relative_path):
+            if path_candidate in self.compare_relative_paths:
+                return True
+        return Path(relative_path).name.casefold() in self.compare_filenames
+
+    def _annotate_selectable_items_with_exists_status(
+        self,
+        selectable_items: list[dict],
+    ) -> list[dict]:
+        """Annotate selectable items with local existence metadata."""
+        if not self.compare_relative_paths and not self.compare_filenames:
+            return selectable_items
+
+        for item in selectable_items:
+            if item["type"] == "file":
+                already_exists = self._item_exists_locally(item["relative_path"])
+            else:
+                already_exists = all(
+                    self._item_exists_locally(path)
+                    for path in item["selected_paths"]
+                )
+
+            item["already_exists"] = already_exists
+            item["display_path"] = (
+                f"[EXISTS] {item['relative_path']}"
+                if already_exists
+                else item["relative_path"]
+            )
+        return selectable_items
 
     def download_item(self, current_task: int, file_info: dict) -> None:
         """Download a single file."""
@@ -363,6 +443,11 @@ class Downloader:
 
     def _select_files_from_items(self, selectable_items: list[dict]) -> list[dict]:
         """Select files from parsed content based on CLI mode and/or user input."""
+        if self.selection_mode == "interactive":
+            selectable_items = self._annotate_selectable_items_with_exists_status(
+                selectable_items,
+            )
+
         total_items = len(selectable_items)
         if total_items == 0:
             return []
@@ -388,7 +473,8 @@ class Downloader:
             console.print("\nAvailable items to download:")
             for index, item in enumerate(selectable_items, start=1):
                 item_type = "Folder" if item["type"] == "folder" else "File"
-                console.print(f"{index:>3}. [{item_type}] {item['relative_path']}")
+                display_path = item.get("display_path", item["relative_path"])
+                console.print(f"{index:>3}. [{item_type}] {display_path}")
             console.print(
                 "\nChoose items (examples: '1,3,5', '1-5', 'all', 'none').",
             )
